@@ -415,6 +415,31 @@ def set_backbone_trainable(model: nn.Module, trainable: bool) -> None:
             param.requires_grad = trainable
 
 
+class AestheticLoss(nn.Module):
+    """Combined Huber (Smooth L1) loss with Pearson Correlation regularization.
+
+    Encourages both low absolute calibration error (MAE) and high relative
+    aesthetic ranking correlation (Pearson r).
+    """
+
+    def __init__(self, beta: float = 0.05, pearson_weight: float = 0.15):
+        super().__init__()
+        self.smooth_l1 = nn.SmoothL1Loss(beta=beta)
+        self.pearson_weight = pearson_weight
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        huber = self.smooth_l1(pred, target)
+        if self.pearson_weight <= 0 or pred.size(0) < 3:
+            return huber
+        pred_diff = pred - pred.mean()
+        target_diff = target - target.mean()
+        cov = (pred_diff * target_diff).sum()
+        std_prod = torch.sqrt((pred_diff**2).sum() * (target_diff**2).sum() + 1e-8)
+        r = cov / std_prod
+        pearson_loss = 1.0 - r
+        return huber + self.pearson_weight * pearson_loss
+
+
 def count_parameters(model: nn.Module) -> int:
     return sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
 

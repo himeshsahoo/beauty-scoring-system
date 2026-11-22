@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader
 
 from common import (
     AestheticDataset,
+    AestheticLoss,
     backbone_parameter_groups,
     build_model,
     count_parameters,
@@ -93,7 +94,8 @@ def train_single_model(name: str, seed: int, train_frame: pd.DataFrame, val_fram
         weight_decay=cfg["weight_decay"],
     )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=2)
-    criterion = nn.SmoothL1Loss(beta=0.05)
+    pearson_weight = float(cfg.get("pearson_loss_weight", 0.15))
+    criterion = AestheticLoss(beta=0.05, pearson_weight=pearson_weight)
     scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
     train_loader, val_loader = make_loaders(train_frame, val_frame, cfg, device)
     print(f"Run seed: {seed}; trainable parameters: {count_parameters(model):,}")
