@@ -267,21 +267,31 @@ def make_transform(size: int, train: bool = False):
 
 
 class AestheticDataset(Dataset):
-    def __init__(self, frame: pd.DataFrame, size: int, train: bool = False):
+    def __init__(self, frame: pd.DataFrame, size: int, train: bool = False, cache_in_memory: bool = False):
         self.frame = frame.reset_index(drop=True).copy()
         self.transform = make_transform(size, train)
+        self.crop_paths = [str(p) for p in self.frame["crop_path"]]
+        self.targets = torch.tensor([score_to_unit(float(s)) for s in self.frame["score_1_10"]], dtype=torch.float32)
+        self.image_ids = [str(i) for i in self.frame["image_id"]]
+        self.cache_in_memory = cache_in_memory
+        self._cache: dict[int, Image.Image] = {}
 
     def __len__(self) -> int:
-        return len(self.frame)
+        return len(self.crop_paths)
 
     def __getitem__(self, idx: int):
-        row = self.frame.iloc[idx]
-        try:
-            image = Image.open(row.crop_path).convert("RGB")
-        except Exception as exc:
-            raise RuntimeError(f"Unreadable crop {row.crop_path}: {exc}") from exc
-        target = torch.tensor(score_to_unit(float(row.score_1_10)), dtype=torch.float32)
-        return self.transform(image), target, row.image_id
+        if self.cache_in_memory and idx in self._cache:
+            image = self._cache[idx]
+        else:
+            path = self.crop_paths[idx]
+            try:
+                with Image.open(path) as img:
+                    image = img.convert("RGB")
+                if self.cache_in_memory:
+                    self._cache[idx] = image
+            except Exception as exc:
+                raise RuntimeError(f"Unreadable crop {path}: {exc}") from exc
+        return self.transform(image), self.targets[idx], self.image_ids[idx]
 
 
 class SimpleCNN(nn.Module):
