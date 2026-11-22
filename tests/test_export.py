@@ -29,6 +29,7 @@ class TestModelExport(unittest.TestCase):
 
     def test_export_and_load_torchscript(self):
         device = torch.device("cpu")
+        self.model.eval()
         out_path = export_torchscript(self.ckpt_path, self.traced_path, device)
         self.assertTrue(out_path.exists())
 
