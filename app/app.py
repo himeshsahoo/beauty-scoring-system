@@ -11,8 +11,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
 
 from analysis import (
+    analyze_feature_importance,
     load_model_bundle,
     occlusion_sensitivity,
+    overlay_heatmap,
     predict_ablation_table,
     predict_background_table,
     predict_face,
@@ -39,6 +41,19 @@ st.warning(
     'Results may reflect demographic, cultural, and image-quality bias; do not use it for hiring, admissions, '
     'dating, medical, or other high-impact decisions.'
 )
+
+st.sidebar.header('Saliency & Heatmap Options')
+saliency_method = st.sidebar.selectbox(
+    'Heatmap Method',
+    ['hierarchical', 'plus_plus', 'gradcam'],
+    format_func=lambda m: {
+        'hierarchical': 'Hierarchical Multi-scale Saliency (Recommended)',
+        'plus_plus': 'Grad-CAM++ (Fine Facial Features)',
+        'gradcam': 'Standard Grad-CAM',
+    }[m],
+)
+heatmap_colormap = st.sidebar.selectbox('Colormap', ['turbo', 'inferno', 'jet', 'viridis', 'magma'])
+heatmap_alpha = st.sidebar.slider('Heatmap Opacity', min_value=0.1, max_value=0.8, value=0.40, step=0.05)
 
 if 'analysis_bundle' not in st.session_state:
     st.session_state.analysis_bundle = None
@@ -73,25 +88,31 @@ if upload:
             elif st.button('Predict human-rated aesthetic score', type='primary'):
                 device = device_info()
                 models, ensemble_enabled, loaded_paths = load_model_bundle(checkpoint_paths, device, minimum_ensemble=5)
-                summary, gradcam_overlay, gradcam_heatmap = predict_face(crop, models, cfg, device)
+                summary, gradcam_overlay, gradcam_heatmap = predict_face(
+                    crop, models, cfg, device, method=saliency_method, colormap=heatmap_colormap, alpha=heatmap_alpha
+                )
                 ablation_table = predict_ablation_table(models, detector, cfg, device, rgb, boxes[face_index])
                 background_table = predict_background_table(models, detector, cfg, device, rgb, boxes[face_index])
                 quality_table = predict_quality_table(models, cfg, device, crop)
                 occlusion_grid, occlusion_heatmap, base_score = occlusion_sensitivity(models, cfg, device, crop)
-                occlusion_overlay = cv2.applyColorMap(np.uint8(occlusion_heatmap * 255), cv2.COLORMAP_TURBO)
-                occlusion_overlay = cv2.cvtColor(occlusion_overlay, cv2.COLOR_BGR2RGB)
+                occlusion_overlay = overlay_heatmap(crop, occlusion_heatmap, alpha=heatmap_alpha, colormap=heatmap_colormap)
                 gradcam_resized = cv2.resize(gradcam_heatmap, (occlusion_heatmap.shape[1], occlusion_heatmap.shape[0]), interpolation=cv2.INTER_CUBIC)
                 gradcam_flat = gradcam_resized.reshape(-1).astype(np.float32)
                 occlusion_flat = occlusion_heatmap.reshape(-1).astype(np.float32)
                 corr = float(np.corrcoef(gradcam_flat, occlusion_flat)[0, 1]) if gradcam_flat.size > 1 else float('nan')
                 if np.isnan(corr):
                     agreement = 'Unavailable'
-                elif corr > 0.6:
+                elif corr > 0.45:
                     agreement = 'High'
-                elif corr > 0.3:
+                elif corr > 0.20:
                     agreement = 'Moderate'
                 else:
                     agreement = 'Low'
+
+                importance = analyze_feature_importance(
+                    gradcam_heatmap, None, crop.shape, fallback_box=(0, 0, crop.shape[1], crop.shape[0])
+                )
+
                 st.session_state.analysis_bundle = {
                     'ensemble_enabled': ensemble_enabled,
                     'checkpoint_count': len(loaded_paths),
@@ -106,6 +127,8 @@ if upload:
                     'occlusion_base': base_score,
                     'gradcam_occlusion_corr': corr,
                     'gradcam_occlusion_agreement': agreement,
+                    'feature_importance': importance,
+                    'method': saliency_method,
                 }
 
 analysis = st.session_state.analysis_bundle
@@ -127,9 +150,15 @@ if analysis:
     with right:
         st.image(
             analysis['gradcam_overlay'],
-            caption='Grad-CAM saliency for the selected face crop. Bright regions show where the model was most sensitive; this is not an objective beauty map.',
+            caption=f'Saliency ({analysis.get("method", "hierarchical").upper()}) on face crop. Shows features most influential in regression score.',
             use_container_width=True,
         )
+
+    if 'feature_importance' in analysis:
+        st.markdown('##### Facial Saliency Concentration')
+        cols = st.columns(len(analysis['feature_importance']))
+        for col, (zone, frac) in zip(cols, analysis['feature_importance'].items()):
+            col.metric(zone.capitalize(), f'{frac * 100:.1f}%')
 
     st.markdown(f'Grad-CAM and occlusion agreement: **{analysis["gradcam_occlusion_agreement"]}**  ')
     st.caption(f'Heatmap correlation: {analysis["gradcam_occlusion_corr"]:.2f}')
