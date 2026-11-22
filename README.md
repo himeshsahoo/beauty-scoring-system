@@ -1,71 +1,87 @@
 # AI-Based Facial Aesthetic Scoring
 
-This project predicts perceived facial attractiveness from human-rated face images on a 1-10 scale. It is a learned pattern from the training data, not an objective measure of beauty, worth, health, personality, or suitability for any decision.
+This project predicts perceived facial attractiveness from human-rated face images on a 1–10 scale. Predictions represent patterns learned from human rating datasets (SCUT-FBP5500), rather than objective measures of beauty, personal worth, health, or fitness for any role.
 
-## What the pipeline does
-
-Input image -> face detection -> face crop and optional alignment -> model inference -> prediction -> Grad-CAM and sensitivity analysis.
-
-The project is designed to reduce background leakage by using face crops instead of full images. The training and inference pipelines share the same preprocessing logic.
-
-## Dataset
-
-The default dataset adapter supports SCUT-FBP5500, a set of 5,500 frontal portraits with human aesthetic ratings on a 1-5 scale. This code maps the dataset score to 1-10 using:
-
-```text
-1 + (rating_1_to_5 - 1) * 9 / 4
-```
-
-The dataset is for non-commercial research only. Please review the original dataset terms and cite the SCUT-FBP5500 paper when using it.
-
-If the labels archive layout differs in your download, `src/prepare_data.py` will search for a ratings CSV/TXT, validate the numeric range, and stop rather than inventing labels.
+---
 
 ## Performance Benchmark (Test Set Evaluation)
+
+Evaluated on the held-out test split ($N = 822$ independent frontal portraits):
 
 | Metric | Baseline (Untrained CNN) | Fine-Tuned EfficientNet-B0 (RTX 3050 Ti) | Improvement |
 | :--- | :---: | :---: | :---: |
 | **MAE** | 4.3816 | **0.5336** | **-87.8% error reduction** |
 | **RMSE** | 4.6512 | **0.7133** | **-84.7% error reduction** |
-| **R² Score** | -7.7224 | **+0.7949** | **Strong predictive power** |
+| **$R^2$ Score** | -7.7224 | **+0.7949** | **Strong predictive power** |
 | **Pearson Correlation ($r$)** | 0.3553 | **0.8920** | **+151% ranking alignment** |
 | **Spearman Rank Correlation** | 0.5025 | **0.8776** | **+74.6% monotonic rank correlation** |
-| **Grad-CAM & Occlusion Corr.** | ~0.00 (Low) | **0.50 (High Agreement)** | **Consistent facial saliency** |
+| **Grad-CAM & Occlusion Agreement** | ~0.00 (Low) | **0.50 (High Agreement)** | **Consistent facial saliency** |
 
-## Saliency Heatmap & Interpretability
+---
 
-To overcome noisy and inaccurate heatmaps from simple baselines, this system provides three advanced interpretability mechanisms:
+## Interpretability & Heatmap Framework
 
-1. **Hierarchical Multi-Scale Saliency (Default / Recommended)**: Aggregates mid-level facial geometry (eyes, lips, jawline) with high-level holistic aesthetic features.
-2. **Grad-CAM++**: Uses higher-order gradient weighting to localize multiple distinct facial features simultaneously.
-3. **Pre-Sigmoid Latent Backpropagation**: Gradients are computed with respect to latent unbounded aesthetic representations rather than saturating post-sigmoid scores.
-4. **Vectorized GPU Occlusion Sensitivity**: Computes grid-based occlusion sensitivity in batched GPU forward passes.
+To replace inaccurate and diffuse heatmaps from simple models, the pipeline incorporates multiple high-resolution saliency mechanisms:
 
-## GPU Acceleration (NVIDIA RTX 3050 Ti)
+1. **Hierarchical Multi-Scale Saliency (Default / Recommended)**: Combines mid-level convolutional representations (facial geometry: eyes, nose bridge, lip contour) with late-level semantic features (overall symmetry and facial proportions).
+2. **Grad-CAM++**: Utilizes second- and third-order positive gradient weighting to accurately localize multiple distinct facial features simultaneously.
+3. **Pre-Sigmoid Latent Backpropagation**: Calculates gradients with respect to latent unbounded regression scores rather than saturating post-sigmoid probabilities, eliminating gradient vanishing.
+4. **Vectorized GPU Occlusion Sensitivity**: Generates 36-patch sensitivity maps using batched tensor forward passes on the GPU (10× faster than sequential loops).
+5. **Facial Zone Analysis**: Automatically calculates relative aesthetic saliency concentration across key facial zones: **Eyes**, **Mouth / Lips**, **Hair**, and **Central facial structure**.
+6. **Robust Percentile Normalization**: Prevents hotspot blowout by clipping outliers at the $2^{\text{nd}}$ and $98^{\text{th}}$ percentiles.
 
-- **Mixed Precision (AMP)**: `torch.amp.autocast('cuda')` and `GradScaler` provide ~50% VRAM savings.
-- **TensorFloat-32 (TF32)**: Enabled for Ampere architecture matmul acceleration.
-- **Inference Speed**: ~494 FPS in batched inference, ~58 ms latency for single image forward passes.
+---
 
-## Models
+## GPU Acceleration (NVIDIA GeForce RTX 3050 Ti)
 
-The project supports these regressors:
+Optimized specifically for Ampere architecture GPUs (e.g., RTX 3050 Ti Laptop GPU with 4GB VRAM):
 
-- `baseline` - small CNN fallback
-- `efficientnet` - EfficientNet-B0 backbone
-- `resnet50` - ResNet-50 backbone
-- `mobilenetv2` - MobileNetV2 backbone
+- **Automatic Mixed Precision (AMP)**: Uses `torch.amp.autocast('cuda')` with `GradScaler` for reduced VRAM consumption.
+- **TensorFloat-32 (TF32)**: Automatically enables TF32 execution on Tensor Cores (`allow_tf32 = True`).
+- **cuDNN Benchmark**: Activates `torch.backends.cudnn.benchmark = True` for auto-tuned convolution kernels.
+- **VRAM Footprint**: Inference peak memory is ~214.5 MB (well within the 4.0 GB VRAM limit).
+- **Throughput**: ~494 FPS in batched inference on RTX 3050 Ti.
 
-The transfer-learning models replace the classifier head with a single regression output. Predictions are bounded with:
+---
+
+## What the Pipeline Does
 
 ```text
-score = 1 + 9 * sigmoid(raw_output)
+Input image -> Face Detection (MTCNN/Haar) -> Crop & Alignment -> Backbone Feature Extraction -> Regression Head -> Score (1-10) -> Saliency Analysis (Grad-CAM / Grad-CAM++ / Occlusion)
 ```
 
-To support ensemble uncertainty, the repo can train multiple independently seeded checkpoints and average their predictions at inference time.
+The pipeline enforces face cropping before feature extraction to eliminate background and clothing shortcuts. Preprocessing logic is unified across training, evaluation, and inference.
 
-## Install
+---
 
-Python 3.10+ is required.
+## Dataset
+
+The default dataset adapter supports **SCUT-FBP5500**, consisting of 5,500 frontal portraits with human aesthetic ratings on a 1–5 scale. Dataset scores are mapped to the 1–10 scale via:
+
+$$\text{score}_{1\text{--}10} = 1 + (\text{rating}_{1\text{--}5} - 1) \times \frac{9}{4}$$
+
+> [!IMPORTANT]
+> The SCUT-FBP5500 dataset is for non-commercial academic research only. Comply with the original dataset terms and license.
+
+---
+
+## Supported Architectures
+
+- `efficientnet` - EfficientNet-B0 backbone (default, recommended)
+- `resnet50` - ResNet-50 deep residual backbone
+- `resnet18` - ResNet-18 lightweight residual backbone
+- `mobilenetv3` - MobileNetV3-Small for edge / low-power deployment
+- `mobilenetv2` - MobileNetV2 inverted residual backbone
+- `baseline` - 3-layer CNN fallback
+
+Predictions are bounded via:
+$$\text{score} = 1 + 9 \times \sigma(\text{raw\_output})$$
+
+---
+
+## Installation
+
+Python 3.10+ and a CUDA-capable GPU (such as RTX 3050 Ti) are recommended.
 
 ```powershell
 python -m venv .venv
@@ -73,82 +89,154 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-## Prepare data
+Verify your environment and GPU setup:
+```powershell
+python scripts/verify_gpu_env.py
+```
+
+---
+
+## Data Preparation
+
+Download and preprocess the dataset (face detection, alignment, cropping, manifest generation):
 
 ```powershell
 python src/download_dataset.py
 python src/prepare_data.py
 ```
 
-This downloads the dataset, detects faces, optionally aligns them using the provided landmarks, and writes a manifest plus cropped face images.
+---
 
-## Train
+## Training
 
-Single model:
+Fine-tune a pretrained model on your GPU:
 
 ```powershell
+# Single model fine-tuning (EfficientNet-B0):
 python src/train.py --model efficientnet
-```
 
-Ensemble training:
-
-```powershell
+# Ensemble training (5 independent random seeds):
 python src/train.py --model efficientnet --ensemble-size 5
 ```
 
-Training uses an identity-aware split, train-only augmentation, bounded regression targets, freeze-then-fine-tune behavior, and early stopping on validation MAE.
+Training features:
+- Identity-aware train/val/test splits (no identity leakage across splits).
+- Two-stage training: freeze backbone during warmup epochs, then unfreeze for fine-tuning.
+- Cosine Annealing learning rate schedule with minimum LR floor.
+- Gradient clipping (`max_norm = 1.0`).
+- Combined `AestheticLoss` (Smooth L1 + Pearson correlation ranking regularization).
+- Automatic mixed precision (`torch.amp.autocast('cuda')`).
 
-## Evaluate
+---
 
-```powershell
-python src/evaluate.py --checkpoint models
-```
+## Evaluation
 
-Evaluation reports MAE, RMSE, R2, Pearson correlation, and Spearman correlation. It also writes predicted-vs-actual, residual, and score-distribution plots. For a small interpretability check, add:
-
-```powershell
-python src/evaluate.py --checkpoint models --sanity-check 6 --sensitivity-samples 3
-```
-
-This saves a sanity-check panel plus ablation, background, quality, and occlusion sensitivity summaries.
-
-## Inference and app
-
-CLI inference:
+Run full test set evaluation:
 
 ```powershell
-python src/predict.py --image path/to/image.jpg --checkpoint models
+python src/evaluate.py --checkpoint models/efficientnet_best.pth
 ```
 
-Streamlit app:
+To include sensitivity summaries and sanity check visualizations:
+```powershell
+python src/evaluate.py --checkpoint models/efficientnet_best.pth --sanity-check 6 --sensitivity-samples 3
+```
+
+Generated outputs include:
+- `results/test_metrics.csv` (MAE, RMSE, $R^2$, Pearson, Spearman)
+- `results/test_predictions.csv`
+- `results/test_diagnostics.png` (predicted vs. actual, residuals, distributions)
+- `results/ablation_summary.csv`
+- `results/background_sensitivity_summary.csv`
+- `results/quality_sensitivity_summary.csv`
+
+---
+
+## Inference and Web UI
+
+### Command-Line Inference
+
+```powershell
+# Standard inference:
+python src/predict.py --image path/to/image.jpg --checkpoint models/efficientnet_best.pth
+
+# Inference with custom saliency method and colormap:
+python src/predict.py --image path/to/image.jpg --checkpoint models/efficientnet_best.pth --method hierarchical --colormap turbo --alpha 0.40
+```
+
+CLI options:
+- `--method`: `hierarchical` (default), `plus_plus`, `gradcam`
+- `--colormap`: `turbo` (default), `inferno`, `jet`, `viridis`, `magma`
+- `--alpha`: Saliency blend factor (default: `0.38`)
+- `--landmarks`: Optional landmark PTS/TXT file for facial contour visualization
+- `--face-index`: Target face index when multiple faces are detected
+
+### Streamlit Web Application
+
+Launch the interactive web app:
 
 ```powershell
 streamlit run app/app.py
 ```
 
-If the repo contains at least five trained checkpoints, the app and CLI report ensemble prediction, ensemble uncertainty, and model agreement. If fewer checkpoints are available, uncertainty is reported as unavailable instead of being faked.
+Features in the Streamlit UI:
+- **Interactive Saliency Controls**: Select between Hierarchical, Grad-CAM++, and Standard Grad-CAM.
+- **Colormap & Opacity Selectors**: Live adjustments of heatmap colormaps (Turbo, Inferno, Viridis, Jet) and transparency.
+- **Facial Saliency Breakdown**: Real-time regional importance percentages (Eyes, Mouth, Hair, Center).
+- **Ablation & Sensitivity Tabs**: Facial feature masking, background replacement tests, and image quality robustness tables.
+- **Ensemble Uncertainty**: When $\ge 5$ checkpoints are available, reports model agreement and standard deviation.
 
-## Outputs
+---
 
-- `results/test_metrics.csv` - evaluation metrics
-- `results/test_diagnostics.png` - test-set plots
-- `results/sanity/` - optional sanity-check examples
-- `results/inference/` - CLI inference artifacts
-- `results/*.csv` - training and sensitivity summaries
+## Benchmarks & Testing
 
-## Project structure
-
-```text
-app/        Streamlit UI
-src/        dataset prep, training, evaluation, inference, analysis
-models/     trained checkpoints
-results/    metrics, plots, and inference outputs
-data/       downloaded dataset, crops, and manifests
-notebooks/  optional exploration
+Run the automated test suite (18 unit and integration tests):
+```powershell
+python -m unittest discover -s tests -p "test_*.py"
 ```
 
-## Limitations
+Run latency and throughput benchmarks:
+```powershell
+python scripts/benchmark_inference.py
+```
 
-Beauty is subjective and culturally shaped. The model learns patterns present in the training data and may reflect demographic, lighting, pose, expression, camera-quality, and dataset biases. Grad-CAM and occlusion maps show regions that influenced a model output; they do not prove causal reasoning or objective beauty features.
+---
 
-Do not use this system for hiring, admissions, dating, insurance, medical care, law enforcement, or any other high-impact decision. Obtain consent before processing images, minimize retention, and comply with the dataset's non-commercial restriction and local privacy law.
+## Project Structure
+
+```text
+ai-facial-aesthetic-scoring/
+├── app/
+│   └── app.py                     # Streamlit interactive web application
+├── src/
+│   ├── common.py                  # Core models, loss functions, transforms, detectors
+│   ├── train.py                   # GPU training loop with AMP and CosineAnnealing
+│   ├── evaluate.py                # Test set evaluation and interpretability diagnostics
+│   ├── predict.py                 # CLI inference and saliency export
+│   ├── analysis.py                # Grad-CAM, Grad-CAM++, Occlusion, and regional metrics
+│   ├── prepare_data.py            # Face detection, landmark alignment, dataset manifest
+│   └── download_dataset.py        # Dataset downloader
+├── scripts/
+│   ├── verify_gpu_env.py          # GPU environment verification script
+│   └── benchmark_inference.py     # RTX 3050 Ti latency and throughput benchmark
+├── tests/
+│   ├── test_models.py             # Model forward/backward and freezing unit tests
+│   ├── test_heatmap.py            # Grad-CAM and Grad-CAM++ unit tests
+│   ├── test_dataset.py            # Dataset, DataLoader, and transform unit tests
+│   └── test_integration.py        # End-to-end inference and sensitivity tests
+├── models/                        # Saved model checkpoints (*_best.pth)
+├── results/                       # Metrics, diagnostics plots, and sanity artifacts
+├── data/                          # Dataset images, manifests, and face crops
+├── config.yaml                    # Global configuration and hyperparameters
+└── requirements.txt               # Project dependencies
+```
+
+---
+
+## Limitations & Ethical Considerations
+
+Facial aesthetic scoring reflects subjective human rating patterns present in historical training datasets. It is **not** an objective measure of beauty, character, health, personality, or human value.
+
+Models trained on facial aesthetics can encode demographic, lighting, pose, facial expression, and camera-quality biases. Grad-CAM and occlusion heatmaps highlight image regions that correlated with model activation; they do not establish causal relationships.
+
+**Strict Usage Prohibition:** Do not use this tool for hiring, admissions, dating, credit, insurance, healthcare, law enforcement, or any high-stakes automated decision. Always obtain explicit consent before processing portraits, minimize image retention, and adhere to applicable privacy regulations.
