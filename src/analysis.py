@@ -518,11 +518,15 @@ def occlusion_sensitivity(
     grid_rows: int = 6,
     grid_cols: int = 6,
 ) -> tuple[np.ndarray, np.ndarray, float]:
+    """Compute occlusion sensitivity map efficiently via batched GPU inference."""
     base = score_from_models(models, crop_rgb, cfg, device).score
     height, width = crop_rgb.shape[:2]
     cell_h = int(np.ceil(height / grid_rows))
     cell_w = int(np.ceil(width / grid_cols))
-    sensitivity = np.zeros((grid_rows, grid_cols), dtype=np.float32)
+
+    patches = []
+    coords = []
+    transform = make_transform(cfg["image_size"], train=False)
 
     for row in range(grid_rows):
         for col in range(grid_cols):
@@ -535,9 +539,29 @@ def occlusion_sensitivity(
             if patch.size == 0:
                 continue
             variant[y1:y2, x1:x2] = cv2.GaussianBlur(patch, (0, 0), sigmaX=18)
-            score = score_from_models(models, variant, cfg, device).score
-            sensitivity[row, col] = abs(score - base)
+            tensor_item = transform(Image.fromarray(variant))
+            patches.append(tensor_item)
+            coords.append((row, col))
 
-    normalized = sensitivity / (sensitivity.max() + 1e-8)
+    if not patches:
+        return np.zeros((grid_rows, grid_cols), dtype=np.float32), np.zeros((width, height), dtype=np.float32), base
+
+    batch_tensor = torch.stack(patches, dim=0).to(device)
+    all_scores: list[np.ndarray] = []
+    with torch.no_grad():
+        for model in models:
+            model.eval()
+            with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
+                raw = model(batch_tensor)
+                score_unit = torch.sigmoid(raw)
+            scores = unit_to_score(score_unit).cpu().numpy()
+            all_scores.append(scores)
+
+    mean_scores = np.mean(all_scores, axis=0)
+    sensitivity = np.zeros((grid_rows, grid_cols), dtype=np.float32)
+    for idx, (row, col) in enumerate(coords):
+        sensitivity[row, col] = abs(float(mean_scores[idx]) - base)
+
+    normalized = normalize_heatmap(sensitivity)
     heatmap = cv2.resize(normalized, (width, height), interpolation=cv2.INTER_CUBIC)
     return sensitivity, heatmap, base
