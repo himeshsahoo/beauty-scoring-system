@@ -91,19 +91,24 @@ def gradcam_heatmap(model: torch.nn.Module, image_rgb: np.ndarray, cfg: dict, de
     tensor = _tensor_from_rgb(image_rgb, cfg["image_size"]).to(device)
     model.eval()
     model.zero_grad(set_to_none=True)
-    raw = model(tensor)
-    score = 1.0 + 9.0 * torch.sigmoid(raw)
-    score.backward()
+    try:
+        raw = model(tensor)
+        # Backpropagate on latent pre-sigmoid regression score to prevent sigmoid gradient saturation
+        raw.sum().backward()
+    finally:
+        hook_forward.remove()
+        hook_backward.remove()
 
-    hook_forward.remove()
-    hook_backward.remove()
+    if not gradients or not activations:
+        raise RuntimeError("Failed to capture gradients or activations for Grad-CAM.")
 
     weights = gradients[0].mean(dim=(2, 3), keepdim=True)
     cam = torch.relu((weights * activations[0]).sum(1, keepdim=True))
     cam = torch.nn.functional.interpolate(cam, size=tensor.shape[-2:], mode="bilinear", align_corners=False)[0, 0]
     cam = cam.detach().cpu().numpy()
     cam = np.clip(cam, 0, None)
-    return (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
+    denom = cam.max() - cam.min()
+    return (cam - cam.min()) / (denom + 1e-8) if denom > 1e-8 else np.zeros_like(cam)
 
 
 def overlay_heatmap(image_rgb: np.ndarray, heatmap: np.ndarray, alpha: float = 0.38) -> np.ndarray:
