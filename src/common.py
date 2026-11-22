@@ -33,20 +33,30 @@ def resolve(config: dict, value: str) -> Path:
     return path if path.is_absolute() else project_root() / path
 
 
-def set_seed(seed: int) -> None:
+def set_seed(seed: int, benchmark: bool = True) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    if benchmark:
+        torch.backends.cudnn.deterministic = False
+        torch.backends.cudnn.benchmark = True
+    else:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 
 def device_info() -> torch.device:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
     if device.type == "cuda":
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        gpu_name = torch.cuda.get_device_name(0)
+        total_vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        cuda_version = torch.version.cuda
+        print(f"GPU: {gpu_name} ({total_vram:.2f} GB VRAM, CUDA {cuda_version})")
+        # Enable TF32 for Ampere (RTX 30-series) GPUs for faster matrix operations
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
     return device
 
 
