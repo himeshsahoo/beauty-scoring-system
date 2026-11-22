@@ -39,21 +39,30 @@ def split_frame(frame: pd.DataFrame, cfg: dict) -> tuple[pd.DataFrame, pd.DataFr
     return train_val.iloc[train_i].copy(), train_val.iloc[val_i].copy(), test.copy()
 
 
-def run_epoch(model, loader, criterion, device, optimizer=None):
+def run_epoch(model, loader, criterion, device, optimizer=None, scaler=None):
     train = optimizer is not None
     model.train(train)
     total_loss = 0.0
     total_mae = 0.0
+    use_amp = device.type == "cuda"
     for x, target_unit, _ in loader:
-        x = x.to(device)
-        target_unit = target_unit.to(device)
-        raw = model(x)
-        pred_unit = torch.sigmoid(raw)
-        loss = criterion(pred_unit, target_unit)
+        x = x.to(device, non_blocking=True)
+        target_unit = target_unit.to(device, non_blocking=True)
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            raw = model(x)
+            pred_unit = torch.sigmoid(raw)
+            loss = criterion(pred_unit, target_unit)
+
         if train:
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            if scaler is not None and use_amp:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
+
         batch_size = x.size(0)
         total_loss += float(loss.item()) * batch_size
         pred_score = unit_to_score(pred_unit.detach())
@@ -85,6 +94,7 @@ def train_single_model(name: str, seed: int, train_frame: pd.DataFrame, val_fram
     )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=2)
     criterion = nn.SmoothL1Loss(beta=0.05)
+    scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
     train_loader, val_loader = make_loaders(train_frame, val_frame, cfg, device)
     print(f"Run seed: {seed}; trainable parameters: {count_parameters(model):,}")
     best_val_mae = float("inf")
@@ -93,8 +103,8 @@ def train_single_model(name: str, seed: int, train_frame: pd.DataFrame, val_fram
     for epoch in range(1, cfg["epochs"] + 1):
         if epoch == freeze_epochs + 1:
             set_backbone_trainable(model, True)
-        train_loss, train_mae = run_epoch(model, train_loader, criterion, device, optimizer)
-        val_loss, val_mae = run_epoch(model, val_loader, criterion, device)
+        train_loss, train_mae = run_epoch(model, train_loader, criterion, device, optimizer=optimizer, scaler=scaler)
+        val_loss, val_mae = run_epoch(model, val_loader, criterion, device, optimizer=None, scaler=None)
         scheduler.step(val_mae)
         history.append(
             {
