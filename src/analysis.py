@@ -277,6 +277,43 @@ def _face_bbox(box: tuple[int, int, int, int], image_shape: tuple[int, int, int]
     return x1, y1, x2, y2
 
 
+def draw_aesthetic_landmarks(
+    image_rgb: np.ndarray,
+    landmarks: np.ndarray | None,
+    color: tuple[int, int, int] = (0, 255, 128),
+    radius: int = 2,
+) -> np.ndarray:
+    """Draw subtle facial aesthetic landmarks on an image."""
+    result = image_rgb.copy()
+    points = _landmark_array(landmarks)
+    if points is None:
+        return result
+
+    for x, y in points.astype(int):
+        cv2.circle(result, (x, y), radius, color, -1, lineType=cv2.LINE_AA)
+    return result
+
+
+def analyze_feature_importance(
+    heatmap: np.ndarray,
+    landmarks: np.ndarray | None,
+    image_shape: tuple[int, int, int],
+    fallback_box: tuple[int, int, int, int],
+) -> dict[str, float]:
+    """Calculate the relative aesthetic saliency concentration per facial zone."""
+    points = _landmark_array(landmarks)
+    zones = ["eyes", "hair", "mouth", "center"]
+    resized_hm = cv2.resize(heatmap, (image_shape[1], image_shape[0]), interpolation=cv2.INTER_LINEAR)
+    total_energy = float(resized_hm.sum()) + 1e-8
+
+    fractions: dict[str, float] = {}
+    for zone in zones:
+        x1, y1, x2, y2 = _region_from_landmarks(points, image_shape, fallback_box, zone)
+        zone_energy = float(resized_hm[y1:y2, x1:x2].sum())
+        fractions[zone] = round(zone_energy / total_energy, 4)
+    return fractions
+
+
 def _clamp_region(x1: int, y1: int, x2: int, y2: int, image_shape: tuple[int, int, int]) -> tuple[int, int, int, int]:
     return (
         max(0, x1),
