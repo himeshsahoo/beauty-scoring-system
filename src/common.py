@@ -256,14 +256,20 @@ def make_transform(size: int, train: bool = False):
         steps = [
             transforms.RandomResizedCrop(size, scale=(0.88, 1.0), ratio=(0.95, 1.05), antialias=True),
             transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomAffine(degrees=8, translate=(0.02, 0.02), scale=(0.96, 1.04), shear=2),
-            transforms.ColorJitter(brightness=0.12, contrast=0.12, saturation=0.06, hue=0.02),
-            transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))], p=0.15),
-            transforms.RandomGrayscale(p=0.03),
+            transforms.RandomAffine(degrees=7, translate=(0.03, 0.03), scale=(0.97, 1.03), shear=2),
+            transforms.ColorJitter(brightness=0.10, contrast=0.10, saturation=0.05, hue=0.02),
+            transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 0.8))], p=0.12),
+            transforms.ToTensor(),
+            transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+            transforms.RandomErasing(p=0.15, scale=(0.02, 0.12), ratio=(0.5, 2.0), value="random"),
         ]
     else:
-        steps = [transforms.Resize((size, size), antialias=True)]
-    return transforms.Compose(steps + [transforms.ToTensor(), transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD)])
+        steps = [
+            transforms.Resize((size, size), antialias=True),
+            transforms.ToTensor(),
+            transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+        ]
+    return transforms.Compose(steps)
 
 
 class AestheticDataset(Dataset):
