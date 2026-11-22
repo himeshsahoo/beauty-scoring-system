@@ -320,15 +320,29 @@ class SimpleCNN(nn.Module):
         return self.head(self.features(x)).squeeze(1)
 
 
-def _replace_head(module: nn.Module, attribute: str) -> None:
+def _replace_head(module: nn.Module, attribute: str, dropout: float = 0.3) -> None:
     head = getattr(module, attribute)
     if isinstance(head, nn.Sequential):
         last = head[-1]
         if not isinstance(last, nn.Linear):
             raise RuntimeError(f"Unexpected classifier layout for {attribute}.")
-        head[-1] = nn.Linear(last.in_features, 1)
+        in_features = last.in_features
+        new_head = nn.Sequential(
+            nn.Dropout(p=dropout),
+            nn.Linear(in_features, 1),
+        )
+        nn.init.normal_(new_head[1].weight, std=0.01)
+        nn.init.constant_(new_head[1].bias, 0.0)
+        setattr(module, attribute, new_head)
     elif isinstance(head, nn.Linear):
-        setattr(module, attribute, nn.Linear(head.in_features, 1))
+        in_features = head.in_features
+        new_head = nn.Sequential(
+            nn.Dropout(p=dropout),
+            nn.Linear(in_features, 1),
+        )
+        nn.init.normal_(new_head[1].weight, std=0.01)
+        nn.init.constant_(new_head[1].bias, 0.0)
+        setattr(module, attribute, new_head)
     else:
         raise RuntimeError(f"Unsupported head type for {attribute}: {type(head)!r}")
 
