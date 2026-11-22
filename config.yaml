@@ -1,17 +1,23 @@
 ﻿seed: 42
 image_size: 224
 batch_size: 32
-epochs: 25
+epochs: 18
 learning_rate: 0.0003
 weight_decay: 0.0001
-num_workers: 2
-patience: 6
+num_workers: 0
+patience: 5
 val_fraction: 0.15
 test_fraction: 0.15
 model_name: efficientnet
 ensemble_size: 5
-freeze_epochs: 3
+freeze_epochs: 2
 backbone_lr_scale: 0.1
+scheduler: cosine
+min_lr: 0.000001
+pearson_loss_weight: 0.15
+amp_enabled: true
+heatmap_method: hierarchical
+heatmap_colormap: turbo
 data:
   root: data/SCUT-FBP5500_v2
   images_dir: data/SCUT-FBP5500_v2/Images
