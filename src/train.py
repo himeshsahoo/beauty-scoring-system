@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
+from scipy.stats import pearsonr
+from sklearn.metrics import r2_score
 from sklearn.model_selection import GroupShuffleSplit
 from torch import nn
 from torch.utils.data import DataLoader
@@ -40,12 +42,14 @@ def split_frame(frame: pd.DataFrame, cfg: dict) -> tuple[pd.DataFrame, pd.DataFr
     return train_val.iloc[train_i].copy(), train_val.iloc[val_i].copy(), test.copy()
 
 
-def run_epoch(model, loader, criterion, device, optimizer=None, scaler=None):
+def run_epoch(model, loader, criterion, device, optimizer=None, scaler=None) -> dict[str, float]:
     train = optimizer is not None
     model.train(train)
     total_loss = 0.0
-    total_mae = 0.0
     use_amp = device.type == "cuda"
+    preds_list = []
+    targets_list = []
+
     for x, target_unit, _ in loader:
         x = x.to(device, non_blocking=True)
         target_unit = target_unit.to(device, non_blocking=True)
@@ -57,21 +61,35 @@ def run_epoch(model, loader, criterion, device, optimizer=None, scaler=None):
         if train:
             optimizer.zero_grad(set_to_none=True)
             if scaler is not None and use_amp:
+                scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
 
         batch_size = x.size(0)
         total_loss += float(loss.item()) * batch_size
-        pred_score = unit_to_score(pred_unit.detach())
-        target_score = unit_to_score(target_unit.detach())
-        total_mae += torch.abs(pred_score - target_score).sum().item()
-    return total_loss / len(loader.dataset), total_mae / len(loader.dataset)
+        preds_list.append(unit_to_score(pred_unit.detach()).cpu().numpy())
+        targets_list.append(unit_to_score(target_unit.detach()).cpu().numpy())
+
+    preds = np.concatenate(preds_list)
+    targets = np.concatenate(targets_list)
+    mae = float(np.mean(np.abs(preds - targets)))
+    rmse = float(np.sqrt(np.mean((preds - targets) ** 2)))
+    r2 = float(r2_score(targets, preds)) if len(targets) > 1 else 0.0
+    r_val = float(pearsonr(preds, targets).statistic) if len(targets) > 2 else 0.0
+
+    return {
+        "loss": total_loss / len(loader.dataset),
+        "mae": mae,
+        "rmse": rmse,
+        "r2": r2,
+        "pearson": r_val,
+    }
 
 
 def make_loaders(train_frame, val_frame, cfg, device):
@@ -116,32 +134,38 @@ def train_single_model(name: str, seed: int, train_frame: pd.DataFrame, val_fram
         if epoch == freeze_epochs + 1:
             set_backbone_trainable(model, True)
             print(f"Unfroze backbone at epoch {epoch}; trainable parameters: {count_parameters(model):,}")
-        train_loss, train_mae = run_epoch(model, train_loader, criterion, device, optimizer=optimizer, scaler=scaler)
-        val_loss, val_mae = run_epoch(model, val_loader, criterion, device, optimizer=None, scaler=None)
+        train_m = run_epoch(model, train_loader, criterion, device, optimizer=optimizer, scaler=scaler)
+        val_m = run_epoch(model, val_loader, criterion, device, optimizer=None, scaler=None)
         if sched_type == "cosine":
             scheduler.step()
         else:
-            scheduler.step(val_mae)
+            scheduler.step(val_m["mae"])
         history.append(
             {
                 "epoch": epoch,
-                "train_loss": train_loss,
-                "val_loss": val_loss,
-                "train_mae": train_mae,
-                "val_mae": val_mae,
+                "train_loss": train_m["loss"],
+                "val_loss": val_m["loss"],
+                "train_mae": train_m["mae"],
+                "val_mae": val_m["mae"],
+                "val_rmse": val_m["rmse"],
+                "val_r2": val_m["r2"],
+                "val_pearson": val_m["pearson"],
                 "lr_head": optimizer.param_groups[0]["lr"],
                 "lr_backbone": optimizer.param_groups[1]["lr"],
             }
         )
-        print(f"{epoch:03d}: train loss {train_loss:.4f}, val loss {val_loss:.4f}, val MAE {val_mae:.4f}")
-        if val_mae < best_val_mae:
-            best_val_mae = val_mae
+        print(
+            f"{epoch:02d}/{cfg['epochs']:02d}: train loss {train_m['loss']:.4f}, val loss {val_m['loss']:.4f} | "
+            f"val MAE {val_m['mae']:.4f}, RMSE {val_m['rmse']:.4f}, R2 {val_m['r2']:.4f}, r {val_m['pearson']:.4f}"
+        )
+        if val_m["mae"] < best_val_mae:
+            best_val_mae = val_m["mae"]
             stale_epochs = 0
             save_checkpoint(model, cfg, name, seed, best_val_mae)
         else:
             stale_epochs += 1
             if stale_epochs >= cfg["patience"]:
-                print("Early stopping.")
+                print(f"Early stopping triggered at epoch {epoch}.")
                 break
 
     return {"history": pd.DataFrame(history), "best_val_mae": best_val_mae}
