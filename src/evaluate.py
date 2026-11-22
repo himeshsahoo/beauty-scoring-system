@@ -228,8 +228,11 @@ def main():
         print(quality_summary.to_string(index=False))
         print(f'\nGrad-CAM vs occlusion mean correlation: {float(np.mean(correlations)):.2f}')
 
-        occlusion_mean = np.mean(np.stack(occlusion_maps, axis=0), axis=0)
-        gradcam_mean = np.mean(np.stack(gradcam_maps, axis=0), axis=0)
+        target_size = (cfg["image_size"], cfg["image_size"])
+        occlusion_resized = [cv2.resize(m, target_size, interpolation=cv2.INTER_LINEAR) for m in occlusion_maps]
+        gradcam_resized_list = [cv2.resize(m, target_size, interpolation=cv2.INTER_LINEAR) for m in gradcam_maps]
+        occlusion_mean = np.mean(np.stack(occlusion_resized, axis=0), axis=0)
+        gradcam_mean = np.mean(np.stack(gradcam_resized_list, axis=0), axis=0)
         fig, axes = plt.subplots(1, 2, figsize=(10, 4))
         axes[0].imshow(gradcam_mean, cmap='turbo')
         axes[0].set_title('Average Grad-CAM')
