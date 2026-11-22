@@ -57,10 +57,12 @@ def run_epoch(model, loader, criterion, device, optimizer=None, scaler=None):
         if train:
             optimizer.zero_grad(set_to_none=True)
             if scaler is not None and use_amp:
-                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 scaler.step(optimizer)
                 scaler.update()
             else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 loss.backward()
                 optimizer.step()
 
@@ -93,7 +95,15 @@ def train_single_model(name: str, seed: int, train_frame: pd.DataFrame, val_fram
         ],
         weight_decay=cfg["weight_decay"],
     )
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=2)
+    sched_type = str(cfg.get("scheduler", "cosine")).lower()
+    if sched_type == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=int(cfg["epochs"]), eta_min=float(cfg.get("min_lr", 1e-6))
+        )
+    else:
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=int(cfg.get("lr_patience", 2)), min_lr=1e-6
+        )
     pearson_weight = float(cfg.get("pearson_loss_weight", 0.15))
     criterion = AestheticLoss(beta=0.05, pearson_weight=pearson_weight)
     scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
@@ -105,9 +115,13 @@ def train_single_model(name: str, seed: int, train_frame: pd.DataFrame, val_fram
     for epoch in range(1, cfg["epochs"] + 1):
         if epoch == freeze_epochs + 1:
             set_backbone_trainable(model, True)
+            print(f"Unfroze backbone at epoch {epoch}; trainable parameters: {count_parameters(model):,}")
         train_loss, train_mae = run_epoch(model, train_loader, criterion, device, optimizer=optimizer, scaler=scaler)
         val_loss, val_mae = run_epoch(model, val_loader, criterion, device, optimizer=None, scaler=None)
-        scheduler.step(val_mae)
+        if sched_type == "cosine":
+            scheduler.step()
+        else:
+            scheduler.step(val_mae)
         history.append(
             {
                 "epoch": epoch,
