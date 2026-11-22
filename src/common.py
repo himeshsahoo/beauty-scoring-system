@@ -366,6 +366,18 @@ class FaceAestheticRegressor(nn.Module):
             )
             _replace_head(self.backbone, "fc")
             self.target_layer = self.backbone.layer4[-1]
+        elif self.name == "resnet18":
+            self.backbone = models.resnet18(
+                weights=models.ResNet18_Weights.DEFAULT if pretrained else None,
+            )
+            _replace_head(self.backbone, "fc")
+            self.target_layer = self.backbone.layer4[-1]
+        elif self.name in {"mobilenetv3", "mobilenet_v3"}:
+            self.backbone = models.mobilenet_v3_small(
+                weights=models.MobileNet_V3_Small_Weights.DEFAULT if pretrained else None,
+            )
+            _replace_head(self.backbone, "classifier")
+            self.target_layer = self.backbone.features[-1]
         elif self.name == "mobilenetv2":
             self.backbone = models.mobilenet_v2(
                 weights=models.MobileNet_V2_Weights.DEFAULT if pretrained else None,
@@ -373,7 +385,7 @@ class FaceAestheticRegressor(nn.Module):
             _replace_head(self.backbone, "classifier")
             self.target_layer = self.backbone.features[-1]
         else:
-            raise ValueError("model must be baseline, efficientnet, resnet50, or mobilenetv2")
+            raise ValueError("model must be baseline, efficientnet, resnet18, resnet50, mobilenetv2, or mobilenetv3")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         output = self.backbone(x)
