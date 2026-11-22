@@ -111,6 +111,55 @@ def gradcam_heatmap(model: torch.nn.Module, image_rgb: np.ndarray, cfg: dict, de
     return (cam - cam.min()) / (denom + 1e-8) if denom > 1e-8 else np.zeros_like(cam)
 
 
+def gradcam_plus_plus_heatmap(model: torch.nn.Module, image_rgb: np.ndarray, cfg: dict, device: torch.device) -> np.ndarray:
+    """Compute Grad-CAM++ saliency map for finer facial feature localization."""
+    target = getattr(model, "target_layer", None)
+    if target is None:
+        modules = [module for module in model.modules() if isinstance(module, torch.nn.Conv2d)]
+        if not modules:
+            raise RuntimeError("No convolutional layer available for Grad-CAM++.")
+        target = modules[-1]
+
+    activations: list[torch.Tensor] = []
+    gradients: list[torch.Tensor] = []
+    hook_forward = target.register_forward_hook(lambda module, inputs, output: activations.append(output))
+    hook_backward = target.register_full_backward_hook(lambda module, grad_inputs, grad_outputs: gradients.append(grad_outputs[0]))
+
+    tensor = _tensor_from_rgb(image_rgb, cfg["image_size"]).to(device)
+    model.eval()
+    model.zero_grad(set_to_none=True)
+    try:
+        raw = model(tensor)
+        raw.sum().backward()
+    finally:
+        hook_forward.remove()
+        hook_backward.remove()
+
+    if not gradients or not activations:
+        raise RuntimeError("Failed to capture gradients or activations for Grad-CAM++.")
+
+    act = activations[0]  # (1, C, H, W)
+    grad = gradients[0]   # (1, C, H, W)
+
+    # Positive gradients
+    grad_pos = torch.relu(grad)
+    grad_2 = grad.pow(2)
+    grad_3 = grad.pow(3)
+
+    # Alpha weights for Grad-CAM++
+    denom = 2.0 * grad_2 + (act * grad_3).sum(dim=(2, 3), keepdim=True)
+    denom = torch.where(denom != 0.0, denom, torch.ones_like(denom))
+    alpha = grad_2 / denom
+
+    weights = (alpha * grad_pos).sum(dim=(2, 3), keepdim=True)
+    cam = torch.relu((weights * act).sum(dim=1, keepdim=True))
+    cam = torch.nn.functional.interpolate(cam, size=tensor.shape[-2:], mode="bilinear", align_corners=False)[0, 0]
+    cam = cam.detach().cpu().numpy()
+    cam = np.clip(cam, 0, None)
+    denom_np = cam.max() - cam.min()
+    return (cam - cam.min()) / (denom_np + 1e-8) if denom_np > 1e-8 else np.zeros_like(cam)
+
+
 def overlay_heatmap(image_rgb: np.ndarray, heatmap: np.ndarray, alpha: float = 0.38) -> np.ndarray:
     resized = cv2.resize(heatmap, (image_rgb.shape[1], image_rgb.shape[0]), interpolation=cv2.INTER_CUBIC)
     color = cv2.applyColorMap(np.uint8(resized * 255), cv2.COLORMAP_TURBO)
