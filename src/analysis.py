@@ -207,11 +207,63 @@ def overlay_heatmap(
     return cv2.addWeighted(image_rgb, 1.0 - alpha, color, alpha, 0)
 
 
-def predict_face(image_rgb: np.ndarray, models: list[torch.nn.Module], cfg: dict, device: torch.device):
+def hierarchical_saliency_heatmap(
+    model: torch.nn.Module,
+    image_rgb: np.ndarray,
+    cfg: dict,
+    device: torch.device,
+    use_plus_plus: bool = True,
+) -> np.ndarray:
+    """Multi-scale feature saliency combining fine facial geometry and high-level aesthetics."""
+    heatmap_fn = gradcam_plus_plus_heatmap if use_plus_plus else gradcam_heatmap
+    late_map = heatmap_fn(model, image_rgb, cfg, device)
+
+    # Attempt to locate a mid-level feature layer
+    mid_layer = None
+    if hasattr(model, "backbone"):
+        if hasattr(model.backbone, "features") and len(model.backbone.features) >= 5:
+            mid_layer = model.backbone.features[len(model.backbone.features) // 2]
+        elif hasattr(model.backbone, "layer3"):
+            mid_layer = model.backbone.layer3[-1]
+
+    if mid_layer is None:
+        return late_map
+
+    orig_target = getattr(model, "target_layer", None)
+    try:
+        model.target_layer = mid_layer
+        mid_map = heatmap_fn(model, image_rgb, cfg, device)
+    except Exception:
+        mid_map = None
+    finally:
+        if orig_target is not None:
+            model.target_layer = orig_target
+
+    if mid_map is None:
+        return late_map
+
+    combined = 0.65 * late_map + 0.35 * mid_map
+    return normalize_heatmap(combined)
+
+
+def predict_face(
+    image_rgb: np.ndarray,
+    models: list[torch.nn.Module],
+    cfg: dict,
+    device: torch.device,
+    method: str = "hierarchical",
+    colormap: str = "turbo",
+    alpha: float = 0.38,
+):
     summary = score_from_models(models, image_rgb, cfg, device)
     representative = _representative_model(models, summary.scores, summary.score)
-    heatmap = gradcam_heatmap(representative, image_rgb, cfg, device)
-    overlay = overlay_heatmap(image_rgb, heatmap)
+    if method == "hierarchical":
+        heatmap = hierarchical_saliency_heatmap(representative, image_rgb, cfg, device)
+    elif method in {"plus_plus", "gradcam++"}:
+        heatmap = gradcam_plus_plus_heatmap(representative, image_rgb, cfg, device)
+    else:
+        heatmap = gradcam_heatmap(representative, image_rgb, cfg, device)
+    overlay = overlay_heatmap(image_rgb, heatmap, alpha=alpha, colormap=colormap)
     return summary, overlay, heatmap
 
 
