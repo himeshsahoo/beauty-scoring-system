@@ -160,10 +160,50 @@ def gradcam_plus_plus_heatmap(model: torch.nn.Module, image_rgb: np.ndarray, cfg
     return (cam - cam.min()) / (denom_np + 1e-8) if denom_np > 1e-8 else np.zeros_like(cam)
 
 
-def overlay_heatmap(image_rgb: np.ndarray, heatmap: np.ndarray, alpha: float = 0.38) -> np.ndarray:
+def normalize_heatmap(
+    heatmap: np.ndarray,
+    lower_percentile: float = 2.0,
+    upper_percentile: float = 98.0,
+) -> np.ndarray:
+    """Robust percentile-based heatmap normalization to prevent hotspot blowout."""
+    if heatmap.size == 0 or np.all(heatmap == 0):
+        return heatmap
+    v_min = float(np.percentile(heatmap, lower_percentile))
+    v_max = float(np.percentile(heatmap, upper_percentile))
+    if v_max <= v_min:
+        return np.zeros_like(heatmap, dtype=np.float32)
+    clipped = np.clip(heatmap, v_min, v_max)
+    return ((clipped - v_min) / (v_max - v_min)).astype(np.float32)
+
+
+def overlay_heatmap(
+    image_rgb: np.ndarray,
+    heatmap: np.ndarray,
+    alpha: float = 0.38,
+    colormap: str = "turbo",
+    threshold: float = 0.15,
+) -> np.ndarray:
+    """Blend saliency heatmap onto face image with colormap and thresholding."""
     resized = cv2.resize(heatmap, (image_rgb.shape[1], image_rgb.shape[0]), interpolation=cv2.INTER_CUBIC)
-    color = cv2.applyColorMap(np.uint8(resized * 255), cv2.COLORMAP_TURBO)
+    resized = normalize_heatmap(resized)
+
+    cm_map = {
+        "turbo": cv2.COLORMAP_TURBO,
+        "jet": cv2.COLORMAP_JET,
+        "inferno": cv2.COLORMAP_INFERNO,
+        "magma": cv2.COLORMAP_MAGMA,
+        "viridis": cv2.COLORMAP_VIRIDIS,
+    }
+    cv_cmap = cm_map.get(colormap.lower(), cv2.COLORMAP_TURBO)
+    color = cv2.applyColorMap(np.uint8(np.clip(resized, 0, 1) * 255), cv_cmap)
     color = cv2.cvtColor(color, cv2.COLOR_BGR2RGB)
+
+    if threshold > 0:
+        # Fade out very low saliency areas so original face remains sharp and clean
+        mask = (resized >= threshold).astype(np.float32)[:, :, None]
+        blended = (1.0 - alpha * mask) * image_rgb + (alpha * mask) * color
+        return np.clip(blended, 0, 255).astype(np.uint8)
+
     return cv2.addWeighted(image_rgb, 1.0 - alpha, color, alpha, 0)
 
 
